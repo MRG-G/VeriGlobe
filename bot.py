@@ -1,6 +1,5 @@
 import os, json, time, html, re
 import feedparser, requests
-from deep_translator import GoogleTranslator
 
 TOKEN = os.environ["BOT_TOKEN"]
 CHANNEL = os.environ["CHANNEL"]  # например @mynewschannel
@@ -51,13 +50,38 @@ def clean(text):
 
 
 def tr(text, src, dst):
-    if not text or src == dst:
+    """Перевод. Возвращает None, если не получилось."""
+    if not text:
+        return ""
+    if src == dst:
         return text
-    try:
-        return GoogleTranslator(source=src, target=dst).translate(text) or text
+    for _ in range(3):
+        try:
+            r = requests.get(
+                "https://translate.googleapis.com/translate_a/single",
+                params={"client": "gtx", "sl": src, "tl": dst, "dt": "t", "q": text},
+                timeout=20,
+            )
+            if r.ok:
+                out = "".join(p[0] for p in r.json()[0] if p and p[0])
+                if out:
+                    return out
+            print("google status", r.status_code)
+        except Exception as e:
+            print("google error:", e)
+        time.sleep(2)
+    try:  # запасной бесплатный переводчик
+        r = requests.get(
+            "https://api.mymemory.translated.net/get",
+            params={"q": text[:480], "langpair": f"{src}|{dst}"},
+            timeout=20,
+        )
+        out = r.json().get("responseData", {}).get("translatedText")
+        if out and "MYMEMORY WARNING" not in out:
+            return out
     except Exception as e:
-        print("translate error:", e)
-        return text
+        print("mymemory error:", e)
+    return None
 
 
 def send(text):
@@ -100,10 +124,21 @@ def main():
             title = clean(e.get("title"))
             summ = clean(e.get("summary"))[:SUMMARY_LEN]
             parts = [f"<b>{html.escape(region)}</b>"]
+            ok_tr = 0
             for code, flag in LANGS:
-                t = html.escape(tr(title, lang, code))
-                s = html.escape(tr(summ, lang, code)) if summ else ""
-                parts.append(f"{flag} <b>{t}</b>" + (f"\n{s}" if s else ""))
+                t = tr(title, lang, code)
+                if t is None:
+                    continue
+                s2 = tr(summ, lang, code) if summ else ""
+                if code != lang:
+                    ok_tr += 1
+                parts.append(
+                    f"{flag} <b>{html.escape(t)}</b>"
+                    + (f"\n{html.escape(s2 or '')}" if s2 else "")
+                )
+            if ok_tr == 0:
+                print("translation failed, skip:", title)
+                continue
             parts.append(f'🔗 <a href="{html.escape(e.get("link", ""))}">{html.escape(name)}</a>')
             if send("\n\n".join(parts)):
                 sent.append(uid)
